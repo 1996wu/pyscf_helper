@@ -273,6 +273,59 @@ auto sparse_hij(const array h1e, const array h2e, const ONV& bra,
   return std::make_tuple(hij_sparse, cols, rows);
 }
 
+auto sparse_hij_part(const array h1e, const array h2e, const ONV& bra,
+                     const int sorb, const int nele, const int noA,
+                     const int noB) {
+  py::buffer_info bra_buf = bra.request();
+  const auto* bra_ptr = reinterpret_cast<const unsigned long*>(bra_buf.ptr);
+  const int bra_len = (sorb - 1) / 64 + 1;
+  const int nSD = squant::get_Num_SinglesDoubles(sorb, noA, noB) + 1;
+  const int nbatch = bra.shape(0);
+  if (bra_len > 1) {
+    throw std::overflow_error("sorb > 64");
+  }
+  std::vector<unsigned long> vec(bra_ptr, bra_ptr + nbatch);
+
+  std::unordered_map<unsigned long, int> onv_Map;
+  for (int64_t i = 0; i < nbatch; i++) {
+    onv_Map[vec[i]] = i;
+  }
+
+  std::vector<double> hij_sparse_s(nbatch * nSD, 0.0);
+  std::vector<double> hij_sparse_d(nbatch * nSD, 0.0);
+  std::vector<double> hij_sparse_sign(nbatch * nSD, 0.0);
+  std::vector<int> cols(nbatch * nSD, 0);
+  std::vector<int> rows(nbatch * nSD, 0);
+  auto merged = get_merged(bra, nele, sorb, noA, noB);  // nbatch * sorb
+  auto h1e_buf = h1e.request();
+  auto h2e_buf = h2e.request();
+  const auto* h1e_ptr = static_cast<const double*>(h1e_buf.ptr);
+  const auto* h2e_ptr = static_cast<const double*>(h2e_buf.ptr);
+
+#pragma omp parallel for
+  for (int64_t i = 0; i < nbatch; i++) {
+    std::vector<unsigned long> SD_comb(nSD, bra_ptr[i * bra_len]);
+    std::fill_n(&cols[i * nSD], nSD, i);
+    for (int64_t j = 0; j < nSD; j++) {
+      if (j >= 1) {
+        squant::get_comb_SD(&SD_comb[j * bra_len], &merged[i * sorb], j - 1,
+                            sorb, bra_len, noA, noB);
+      }
+      auto [x, y, z] =
+          squant::get_Hij_part(&bra_ptr[i * bra_len], &SD_comb[j * bra_len],
+                               h1e_ptr, h2e_ptr, sorb, nele, bra_len);
+      hij_sparse_s[i * nSD + j] = x;
+      hij_sparse_d[i * nSD + j] = y;
+      hij_sparse_sign[i * nSD + j] = z;
+      rows[i * nSD + j] = onv_Map.find(SD_comb[j * bra_len]) != onv_Map.end()
+                              ? onv_Map[SD_comb[j * bra_len]]
+                              : -1;
+    }
+  }
+  return std::make_tuple(hij_sparse_s, hij_sparse_d, hij_sparse_sign, cols,
+                         rows);
+}
+
 PYBIND11_MODULE(libs, m) {
   m.def("get_hij", &get_Hij, py::arg("bra"), py::arg("ket"), py::arg("h1e"),
         py::arg("h2e"), py::arg("sorb"), py::arg("nele"),
@@ -290,4 +343,5 @@ PYBIND11_MODULE(libs, m) {
         "Return all singles and doubles excitation for given onv"
         "using CPU with numpy");
   m.def("sparse_hij", &sparse_hij);
+  m.def("sparse_hij_part", &sparse_hij_part);
 }
