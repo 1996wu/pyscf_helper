@@ -1,0 +1,5 @@
+**/__pycache__
+**/*.pysc
+**/*cpython*x86_64-linux-gnu.so
+**/*.egg-info
+**/build
