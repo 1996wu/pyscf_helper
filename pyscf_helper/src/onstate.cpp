@@ -22,7 +22,7 @@ int parity_cpu(const unsigned long *bra, const int sorb) {
     p ^= get_parity_cpu(bra[i]);
   }
   if (sorb % 64 != 0) {
-    p ^= get_parity_cpu((bra[sorb / 64] & get_ones_cpu(sorb % 64 == 0 ? 64 : sorb % 64)));
+    p ^= get_parity_cpu((bra[sorb / 64] & get_ones_cpu(sorb % 64)));
   }
   return -2 * p + 1;
 }
