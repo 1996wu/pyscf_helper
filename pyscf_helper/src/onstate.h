@@ -7,8 +7,8 @@ inline int popcnt_cpu(unsigned long x) { return __builtin_popcountl(x); }
 
 inline int get_parity_cpu(unsigned long x) { return __builtin_parityl(x); }
 
-inline unsigned long get_ones_cpu(unsigned long n) {
-  return (1ULL << n) - 1ULL;
+inline unsigned long get_ones_cpu(const int n) {
+  return (n == 64) ? ~0ULL : (1ULL << n) - 1ULL;
 }
 
 inline double num_parity_cpu(unsigned long x, int i) {
