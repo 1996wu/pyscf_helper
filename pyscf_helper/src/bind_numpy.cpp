@@ -134,8 +134,8 @@ auto tensor_to_onv(const ONV& bra_tensor, const int sorb) {
   std::fill(states_ptr, states_ptr + nbatch * bra_len, 0);  // fill 0
 
 #pragma omp parallel for
-  for (int i = 0; i < nbatch; i++) {
-    for (int j = 0; j < sorb; j++) {
+  for (int64_t i = 0; i < nbatch; i++) {
+    for (int64_t j = 0; j < sorb; j++) {
       if (bra_ptr[i * sorb + j] == 1) {  // 1: occupied 0: unoccupied
         BIT_FLIP(states_ptr[i * bra_len + j / 64], j % 64);
       }
@@ -148,7 +148,7 @@ auto tensor_to_onv(const ONV& bra_tensor, const int sorb) {
 array onv_to_tensor(const ONV& bra, const int sorb) {
   py::buffer_info bra_buf = bra.request();
   const auto* bra_ptr = reinterpret_cast<const unsigned long*>(bra_buf.ptr);
-  std::vector<int64_t> shape = bra_buf.shape;
+  auto shape = bra_buf.shape;
   int nbatch = shape[0];
   const int bra_len = (sorb - 1) / 64 + 1;
 

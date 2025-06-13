@@ -1,5 +1,7 @@
 **/__pycache__
 **/*.pysc
-**/*cpython*x86_64-linux-gnu.so
+**/*.so
 **/*.egg-info
 **/build
+.gitignore
+**/*.DS_Store

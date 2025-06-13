@@ -1,25 +1,32 @@
-CXX = g++
-CXXFLAGS = -O3 -Wall -std=c++17 -fPIC -fopenmp
+PLATFORM = mac  # mac
+
+LDFLAGS = -shared -fPIC
+ifeq ($(strip $(PLATFORM)), linux)
+    CXX = g++
+    CXXFLAGS = -O3 -Wall -std=c++17 -fPIC -fopenmp
+    LDFLAGS += -fopenmp
+else ifeq ($(strip $(PLATFORM)), mac)
+    CXX = clang++
+    OMP_PATH = $(shell brew --prefix libomp)
+    CXXFLAGS = -O3 -Wall -std=c++17 -fPIC -Xpreprocessor -fopenmp -I$(OMP_PATH)/include
+    LDFLAGS += -L$(OMP_PATH)/lib -lomp -undefined dynamic_lookup
+endif
 
 SRC = $(wildcard *.cpp)
 OBJ = $(patsubst %.cpp, $(BUILD_DIR)/%.o, $(SRC))
 TARGET = libs$(shell python3-config --extension-suffix)
 
 # Paths to Pybind11 and Python include directories
-PYBIND11_INCLUDE = $(shell python3 -m pybind11 --includes)
+PYBIND11_INCLUDE = $(shell python -m pybind11 --includes)
 
-# Output directory for build
 BUILD_DIR = ./build
-
-# Compiler and linker flags
-LDFLAGS = -shared -fPIC
 
 all: $(BUILD_DIR)/$(TARGET)
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-$(BUILD_DIR)/%.o: %.cpp
+$(BUILD_DIR)/%.o: %.cpp | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(PYBIND11_INCLUDE) -c $< -o $@
 
 # Link object files into a shared library
