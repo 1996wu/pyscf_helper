@@ -1,6 +1,5 @@
-sphinx>=7.0
-sphinx-rtd-theme>=2.0.0
-recommonmark>=0.7.1
-sphinx-markdown-tables>=0.0.15
-sphinxcontrib-tikz>=0.4.15
-sphinxcontrib-mathjax>=3.0.0
+sphinx
+sphinx-rtd-theme
+recommonmark
+sphinx-markdown-tables
+sphinxcontrib-tikz
