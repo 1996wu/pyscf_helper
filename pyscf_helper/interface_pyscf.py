@@ -9,15 +9,21 @@ import functools
 import warnings
 
 from numpy import ndarray
-from typing import Tuple, List, Union
+from typing import Tuple, List, Union, TypedDict
 from pyscf.scf import hf
 from pyscf import ao2mo, gto, scf, fci, cc, ci, lo
 
 
 from .hubbard_pyscf import get_hubbard_model, get_RHF_int_h1h2
+from .fielder import orbitalOrdering
 
 __all__ = ["interface"]
 
+
+class IntInfo(TypedDict):
+    ecore: float
+    int1e: ndarray
+    int2e: ndarray
 
 # Provide the basic interface
 class Iface:
@@ -49,17 +55,12 @@ class Iface:
         eri = eri.reshape(nact, nact, nact, nact)
         print("finished")
         print(ecore)
-        # for debug
-        # np.savez("h.npz",h1e=hmo,h2e=eri)
-        # hmo = np.load("h.npz")["h1e"]
-        # eri = np.load("h.npz")["h2e"]
-        # For change the order of sorb (<kongjian> orbitial)
-        # breakpoint()
-        # import networkx as nx
-        # graph_index = list(map(int,nx.read_graphml("./graph/H6-maxdes0.graphml").nodes))
-        # order = np.array(graph_index)
-        # hmo = hmo[np.ix_(order,order)]
-        # eri = eri[np.ix_(order,order,order,order)]
+
+        kij = np.einsum("ijji -> ij", eri)
+        order = orbitalOrdering(kij,mode='kmat',debug=False)
+        print(f"order: {order}")
+        hmo = hmo[np.ix_(order,order)]
+        eri = eri[np.ix_(order,order,order,order)]
         return ecore, hmo, eri
 
     def get_integral_FCIDUMP(fname="FCIDUMP") -> Tuple[float, ndarray, ndarray]:
@@ -99,6 +100,7 @@ class Iface:
     def dump(info, fname="mole.info"):
         print("\n[iface.dump] fname=", fname)
         ecore, int1e, int2e = info
+        # numpy.savez("h-int.npz", ecore=ecore, int1e=int1e, int2e=int2e)
         print(f"int1e: {int1e.shape} int2e: {int2e.shape}")
         # Spin orbital integrals
         sbas = 2 * int1e.shape[0]
@@ -110,6 +112,7 @@ class Iface:
         h2e[1::2, 1::2, 1::2, 1::2] = int2e  # BBBB
         h2e[0::2, 0::2, 1::2, 1::2] = int2e  # AABB
         h2e[1::2, 1::2, 0::2, 0::2] = int2e  # BBAA
+        # numpy.savez("h.npz",ecore=ecore, h1e=h1e,h2e=h2e)
         h2e = h2e.transpose(0, 2, 1, 3)  # <ij|kl> = [ik|jl]
         h2e = h2e - h2e.transpose(0, 1, 3, 2)  # Antisymmetrize V[pqrs]=<pq||rs>
         
@@ -174,7 +177,7 @@ def interface(
     localized_orb: bool = False,
     localized_method: str = "lowdin",
     fci_dump_file: str = None,
-) -> Tuple[int, int, List[float], ndarray, ndarray, any]:
+) -> Tuple[int, int, List[float], ndarray, ndarray, any, IntInfo]:
     """
     PYSCF interface
 
@@ -248,22 +251,6 @@ def interface(
         else:
             tools.fcidump.from_integrals(fci_dump_file, info[1], ao2mo.kernel(mol, mo_coeff), mol.nao, [nele//2,nele//2], info[0])
     Iface.dump(info, fname=integral_file)
-    # np.savez("h.npz",h1e=info[1],h2e=info[2])
-    
-    # info1 = Iface.get_integral_FCIDUMP(fname="H6-fcidump.txt") # e, int1e, int2e
-    # from renormalizer.model import h_qc
-    # info2 = h_qc.read_fcidump(fci_dump_file, 6) # int1e, int2e, e
-    # breakpoint()
-    # graph
-    # from utils.graph import fielder, nxutils
-    # import networkx as nx
-
-    # eri = info[2]
-    # kij = np.einsum('ijji->ij',eri)
-    # forder = fielder.orbitalOrdering(kij,mode='kmat',debug=False)
-    # fgraph = nxutils.fromOrderToDiGraph(forder)
-    # nx.write_graphml_xml(fgraph, "./graph/H12-2.00-Bohr-sto6g.graphml")
-    # breakpoint()
 
     if sorb <= 20:
         cisolver = fci.FCI(mf, mo_coeff)
@@ -287,21 +274,20 @@ def interface(
         except:
             warnings.warn(f"CCSD kernel failed")
 
-    e_lst: List[float]
+    e_lst = [e_ref, e_hf]
     if cisd_coeff:
         myuci = ci.UCISD(mf)
         e_ucisd, ucisd_amp = myuci.kernel()
-        e_lst = [e_ref, e_ucisd + e_hf, e_hf]
-        return (sorb, nele, e_lst, coeff, ucisd_amp, mf)
-
-    e_lst = [e_ref, e_hf]
+        e_lst.insert(1, e_ucisd + e_hf)
+        amp = ucisd_amp
     if not fci_coeff:
         coeff = np.zeros(1)
         amp = np.zeros(1)
-        return (sorb, nele, e_lst, coeff, amp, mf)
     else:
         amp = np.zeros(1)
-        return (sorb, nele, e_lst, coeff, amp, mf)
+
+    info_dict = IntInfo(ecore=info[0], int1e=info[1], int2e=info[2])
+    return (sorb, nele, e_lst, coeff, amp, mf, info_dict)
 
 
 if __name__ == "__main__":

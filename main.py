@@ -11,19 +11,19 @@ from pyscf_helper.libs import get_hij, get_hij_part, get_comb, sparse_hij, spars
 
 atom = ""
 bond = 1.60
-for k in range(10):
+for k in range(4):
     atom += f"H, 0.00, {0.00}, {k * bond};"
 integral_file = tempfile.mkstemp()[1]
-sorb, nele, e_lst, fci_amp, ucisd_amp, mf = interface(
+sorb, nele, e_lst, fci_amp, ucisd_amp, mf, info = interface(
     atom,
     integral_file=integral_file,
     cisd_coeff=True,
     basis="STO-3G",
     # unit="", # bohr
-    localized_orb=True,
+    localized_orb=False,
     localized_method="meta-lowdin",
 )
-
+print(info.keys())
 h1e, h2e, ci_space, ecore, sorb = read_integral(
     integral_file,
     nele,
