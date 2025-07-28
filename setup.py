@@ -14,6 +14,8 @@ extra_compile_args = ["-O3", "-Wall", "-std=c++17", "-fPIC"]
 os.environ["CC"] = "gcc"
 os.environ["CXX"] = "g++"
 if is_mac:
+    os.environ["CC"] = "clang"
+    os.environ["CXX"] = "clang++"
     omp_path = os.popen("brew --prefix libomp").read().strip()
     extra_compile_args += ["-Xpreprocessor", "-fopenmp", f"-I{omp_path}/include"]
     extra_link_args = [f"-L{omp_path}/lib", "-lomp", "-undefined", "dynamic_lookup"]
