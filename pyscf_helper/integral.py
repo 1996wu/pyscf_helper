@@ -121,8 +121,8 @@ def read_integral(
 
     Returns:
     -------
-        h1e, h2e: torch.float64
-        onstate: torch.int8 in Full-CI space or part-FCI space
+        h1e, h2e: np.float64
+        onstate: np.uint8 in Full-CI space or part-FCI space
         ecore: float
         sorb: int
     """

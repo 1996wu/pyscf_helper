@@ -1,4 +1,4 @@
-PLATFORM = mac  # mac
+PLATFORM = linux  # mac
 
 LDFLAGS = -shared -fPIC
 ifeq ($(strip $(PLATFORM)), linux)

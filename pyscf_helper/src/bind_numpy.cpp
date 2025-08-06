@@ -5,6 +5,7 @@
 #include "excitation.h"
 #include "hamiltonian.h"
 #include "hamiltonian_part.h"
+#include "integral.h"
 
 namespace py = pybind11;
 using ONV = py::array_t<uint8_t>;
@@ -344,4 +345,9 @@ PYBIND11_MODULE(libs, m) {
         "using CPU with numpy");
   m.def("sparse_hij", &sparse_hij);
   m.def("sparse_hij_part", &sparse_hij_part);
+  m.def("compress_h1e_h2e", &compress_h1e_h2e, py::arg("h1e"), py::arg("h2e"),
+        py::arg("sorb"), "Compress h1e(2D) and h2e(4D) to 1D");
+  m.def("decompress_h1e_h2e", &decompress_h1e_h2e, py::arg("h1e"), py::arg("h2e"),
+        py::arg("sorb"), "Decompress h1e/h2e(1D) to 2D/4D");
+
 }

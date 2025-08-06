@@ -1,24 +1,36 @@
 """
 Operator, e.g. S-S+, S^2
 """
+
 from __future__ import annotations
 
 import time
 import sys
 import warnings
-import torch
 import numpy as np
+
 sys.path.append("./")
 
 from numpy import ndarray
-from torch import Tensor
-from typing import Tuple
+from numpy.typing import NDArray
+from typing import Tuple, TypedDict
+
+h1e = NDArray[np.float64]
+h2e = NDArray[np.float64]
+OpTuple = tuple[h1e, h2e]
+
+
+class NaNbSpinRaise_ops(TypedDict):
+    Na: OpTuple
+    Nb: OpTuple
+    spin_raise: OpTuple
+
 
 def _compress_h1e_h2e_py(
     h1e: ndarray,
     h2e: ndarray,
     sorb: int,
-) -> Tuple[ndarray, ndarray]:
+) -> OpTuple:
     pair = sorb * (sorb - 1) // 2
     int1e = np.zeros(sorb * sorb, dtype=np.float64)  # <i|O1|j>
     int2e = np.zeros((pair * (pair + 1)) // 2, dtype=np.float64)  # <ij||kl>
@@ -50,11 +62,12 @@ def _compress_h1e_h2e_py(
 
     return int1e, int2e
 
+
 def _decompress_h1e_h2e_py(
     h1e: ndarray,
     h2e: ndarray,
     sorb: int,
-) -> Tuple[ndarray, ndarray]:
+) -> OpTuple:
     pair = sorb * (sorb - 1) // 2
     assert h1e.shape[0] == sorb * sorb
     assert h2e.shape[0] == (pair * (pair + 1)) // 2
@@ -90,7 +103,8 @@ def _decompress_h1e_h2e_py(
 
     return int1e, int2e
 
-def spin_raising(sbas: int, c1: float = 1.0, compress: bool = True) -> tuple[Tensor, Tensor]:
+
+def spin_raising(sbas: int, c1: float = 1.0, compress: bool = True) -> OpTuple:
     """
     S-S+
     return compress h1e, h2e
@@ -137,9 +151,50 @@ def spin_raising(sbas: int, c1: float = 1.0, compress: bool = True) -> tuple[Ten
         func = _compress_h1e_h2e_py
 
     if compress:
-        return tuple(map(torch.from_numpy, func(h1e, h2e, sbas)))
+        return func(h1e, h2e, sbas)
     else:
-        return tuple(map(torch.from_numpy, (h1e, h2e)))
+        return h1e, h2e
+
+
+def operators(sbas: int, compress: bool = True) -> NaNbSpinRaise_ops:
+    """
+    Nα and Nβ, SpinRaise<S_S+>
+    return compress h1e, h2e
+    """
+    nbas = sbas // 2
+    sp_SR = np.zeros((sbas, sbas))
+    sp_Na = np.zeros((sbas, sbas))
+    sp_Nb = np.zeros((sbas, sbas))
+    for i in range(nbas):
+        ie = 2 * i
+        io = 2 * i + 1
+        sp_SR[ie, io] = 1.0  # <S-S+>
+        sp_Na[ie, ie] = 1.0  # <Na>
+        sp_Nb[io, io] = 1.0  # <Nb>
+
+    def get_h1eh2e(sp):
+        h1e = np.dot(sp.T, sp)
+        vprqs = np.einsum("qp,rs->prqs", sp, sp)
+        vprqs = vprqs - vprqs.transpose(0, 1, 3, 2)
+        vprqs = vprqs - vprqs.transpose(1, 0, 2, 3)
+        h2e = vprqs
+        return h1e, h2e
+
+    try:
+        from libs.C_extension import compress_h1e_h2e as func
+    except ImportError:
+        func = _compress_h1e_h2e_py
+
+    ops = {
+        "Na": get_h1eh2e(sp_Na),
+        "Nb": get_h1eh2e(sp_Nb),
+        "spin_raise": get_h1eh2e(sp_SR),
+    }
+
+    if compress:
+        return {k: func(*v, sbas) for k, v in ops.items()}
+    else:
+        return ops
 
 
 if __name__ == "__main__":
@@ -155,6 +210,7 @@ if __name__ == "__main__":
 
     try:
         from libs.C_extension import decompress_h1e_h2e, compress_h1e_h2e
+
         t1 = time.time_ns()
         result2 = compress_h1e_h2e(h1e, h2e, sorb)
         result3 = decompress_h1e_h2e(result2[0], result2[1], sorb)
