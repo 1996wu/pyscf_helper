@@ -2,6 +2,9 @@
 Optim
 #####
 
+VMCOptimizer
+========================
+
 ``vmc/optim/optimizer/VMCOptimizer``
 
 .. code-block:: python
@@ -128,3 +131,66 @@ opt-params
 * ``start_clip_grad``: clip gradient from the k-th iteration.
 
 * ``clip_grad_scheduler``: the scheduler of clipping gradient, this is ``Callable[[int], float]``.
+
+* ``sr``: use minSR.
+
+* ``lm``: use Linear method.
+
+* ``LM_delta``: delta in Linear method.
+
+Optimizer
+=========
+
+Linear method
+-------------
+
+Linear method ref.
+
+- J. Chem. Phys. 152, 024111 (2020); doi: 10.1063/1.5125803
+- PHYSICAL REVIEW RESEARCH 7, 043351 (2025)
+
+Linear method的梯度计算在 ``pynqs/optim/grad/lm.py`` 的函数 ``LM_grad`` 中，
+欲使用之，可直接在class ``VMCOptimizer`` 中打开 ``lm: True`` 即可。
+除此之外，还有超参 :math:`\delta` 需要调整(即参数 ``LM_delta``)，默认为 :math:`0.1`, 并按照 ``delta = max(delta * 0.9**(epoch), 1e-6)`` 进行衰减。
+理论上在优化最后，这项应该衰减至 :math:`0`.
+
+该段代码包含计算梯度和更新两部分，计算梯度按照 J. Chem. Phys. 152, 024111 (2020) 中的方式实现，具体公式推导见文档。
+简而言之，最后是构造一下广义本征值问题(GEVP)并求解：
+
+.. math:: 
+        Lc = \tilde{E} Rc,\quad 
+    L = \begin{bmatrix}
+        E & G^\top_{\rm r} \\
+        G_{\rm c} & H
+    \end{bmatrix} + \delta I
+    , 
+    R = \begin{bmatrix}
+        1&\\
+        &S
+    \end{bmatrix}+\delta'I
+
+with
+
+.. math:: 
+    [G_{\rm r}]_i &= \langle{h_i(n)}\rangle - E\langle{g_i(n)}\rangle\\
+    [G_{\rm c}]_i &= \sum_n p(n) \bar{\epsilon}(n) O_i(n)\\
+    S_{ij} &= \sum_n p(n) \bar{o}_i(n)O_j(n)\\
+    H_{ij} &= \sum_n p(n)\bar{o}_i(n) h_j(n) - [G_{\rm c}]_i\langle{O_j(n)}\rangle
+
+where
+
+.. math::
+    \bar{\epsilon}(n) &= E_{\rm loc}(n) - \langle{E_{\rm loc}(n)}\rangle\\
+    \bar{o}_i(n) &= O_i(n) - \langle{O_i(n)}\rangle
+
+and
+
+.. math::
+    h_i(n) = \partial_i E_{\rm loc}(n) +  O_i(n)E_{\rm loc}(n),\quad \partial_i E_{\rm loc}(n) = \frac{\partial}{\partial\theta_i}\sum_{m\in SD}H_{nm}\frac{\varPsi(m)}{\varPsi(n)}
+
+.. math::
+    g_i(n) &= \frac{\langle n|\varPsi_i\rangle}{\langle n|\varPsi\rangle} = \frac{1}{\varPsi(n)} \frac{\partial\varPsi(n)}{\partial\theta_i} = O_i(n) \label{eq:gi}\\
+    h_i(n) &= \frac{\langle n|\hat{H}|\varPsi_i\rangle}{\langle n|\varPsi\rangle} = \partial_i E_{\rm loc}(n) +  O_i(n)E_{\rm loc}(n)
+
+这里 :math:`|\Psi_i\rangle = \partial_{\theta_i}|\Psi\rangle`,
+在更新的时候，实现了以上文章中类似线搜索的方式，见 ``try_step_update`` 函数。
