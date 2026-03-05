@@ -141,8 +141,9 @@ opt-params
 Optimizer
 =========
 
+
 Linear method
--------------
+--------------
 
 Linear method ref.
 
@@ -192,5 +193,5 @@ and
     g_i(n) &= \frac{\langle n|\varPsi_i\rangle}{\langle n|\varPsi\rangle} = \frac{1}{\varPsi(n)} \frac{\partial\varPsi(n)}{\partial\theta_i} = O_i(n) \label{eq:gi}\\
     h_i(n) &= \frac{\langle n|\hat{H}|\varPsi_i\rangle}{\langle n|\varPsi\rangle} = \partial_i E_{\rm loc}(n) +  O_i(n)E_{\rm loc}(n)
 
-这里 :math:`|\Psi_i\rangle = \partial_{\theta_i}|\Psi\rangle`,
+这里 :math:`|\varPsi_i\rangle = \partial_{\theta_i}|\varPsi\rangle`,
 在更新的时候，实现了以上文章中类似线搜索的方式，见 ``try_step_update`` 函数。

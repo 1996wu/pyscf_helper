@@ -21,7 +21,7 @@ Classical VMC
 ~~~~~~~~~~~~~~
 
 For NQS :math:`\ket{\varPsi}`, one can sample ON vector :math:`|n\rangle \sim |\varPsi(n)|^2/\langle\varPsi|\varPsi\rangle`
-, which can be sampled by using of MCMC sampling or Autoregressive sampling. So the expectation of energy functional :math:`\langle E\rangle = \langle H\rangle` can be calculated by 
+, which can be sampled by using of MCMC sampling or Autoregressive sampling. So the expectation of energy functional :math:`E = \langle \hat{H}\rangle` can be calculated by 
 
 .. math::
     \begin{aligned}
@@ -355,4 +355,28 @@ NEQS的local energy的计算方法可以仍然使用NQS的计算方法 (include 
             device=device,
         )
 
+注意，在 ``PyNQS`` 程序中，打印Topk的configuration的部分是使用WFLUT进行实现的，WFLUT在目前的NEQS中并没有实现。
+所以若进行NEQS计算，需要先设置 ``samples_topk_config.apply(debug=False)``。
 之后优化器会自动识别NEQS的类型，然后进行网络的训练。
+
+在训练之后，若需得到第 :math:`k` 个态的波函数，可以根据对角化local energy得到的本征矢 :math:`V_k` 进行变换，
+即定义
+
+.. math::
+    \ket{\varPsi_k} = \sum_{i=1}^K \ket{\psi_i} (V_{k})_i
+
+在实际计算中，可以用以下程序进行实现：
+
+.. code-block:: python
+    :linenos:
+
+        from pynqs.ansatz import Targetwavefunctions
+
+        ansatz = Targetwavefunctions(
+            c = c,
+            single_ansatz = NNBF_list,
+            dtype=torch.float64,
+            device=device,
+        )
+
+here ``c`` is :math:`\boldsymbol{E}_{\rm loc}` 的第 :math:`k` 个本征矢。
