@@ -217,8 +217,8 @@ see: ``vmc/energy/eloc/_reduce_psi``
 
 **Method 2**:
 
-\hat{U}se Look\hat{U}p-table(L\hat{U}T) coming from sampling to reduce :math:`\varPsi(n^{\prime})`,
-:math:`\varPsi(n^{\prime})` is **non-zero** if :math:`n^{\prime}` is the **key** of the L\hat{U}T.
+Use LookUp-Table(LUT) coming from sampling to reduce :math:`\varPsi(n^{\prime})`,
+:math:`\varPsi(n^{\prime})` is **non-zero** if :math:`n^{\prime}` is the **key** of the LUT.
 
 **Note**: This methods could be is **ineffective** when When :math:`p(n)` presents basically the same
 (H\ :sub:`50`\, STO-6G, aoa-basis).
@@ -291,7 +291,7 @@ and
 
 这里 :math:`\hat{\mathcal{H}}=\sum_{k=1}^K\hat{H}_k`, 每一个 :math:`\hat{H}_k` 作用在对应的子空间的configuration :math:`\ket{S_k}` 上。
 
-NEQS的local energy的计算方法可以仍然使用NQS的计算方法 (include ``SIMPLE``, ``RED\hat{U}CE``, ...)，依照以上矩阵元循环计算(see ``pynqs/energy/eloc.py`` 的函数 ``excited_eloc``)。
+NEQS的local energy的计算方法可以仍然使用NQS的计算方法 (include ``SIMPLE``, ``REDUCE``, ...)，依照以上矩阵元循环计算(see ``pynqs/energy/eloc.py`` 的函数 ``excited_eloc``)。
 在计算结束之后，传入标量形式的local energy :math:`E_{\rm loc}(\mathcal{S})` 以计算并更新梯度。
 激发态能量可以通过对角化矩阵形式的local energy :math:`\boldsymbol{E}_{\rm loc}` 得到(see ``pynqs/energy/etot.py`` 的函数 ``calculate_energy``)。
 
@@ -321,7 +321,7 @@ NEQS的local energy的计算方法可以仍然使用NQS的计算方法 (include 
                 n_det=1,
                 n_layer=1,
                 hidden_shape=16,
-                hidden_activation='SiL\hat{U}',
+                hidden_activation='SiLU',
                 device=device,
                 param_dtype=torch.float64,
                 # J='NNMPS',
