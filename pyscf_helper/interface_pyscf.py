@@ -252,7 +252,7 @@ def interface(
             tools.fcidump.from_integrals(fci_dump_file, info[1], ao2mo.kernel(mol, mo_coeff), mol.nao, [nele//2,nele//2], info[0])
     Iface.dump(info, fname=integral_file)
 
-    if sorb <= 20:
+    if sorb <= 24:
         cisolver = fci.FCI(mf, mo_coeff)
         e_ref, coeff = cisolver.kernel()
         try:

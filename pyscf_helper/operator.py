@@ -145,7 +145,7 @@ def spin_raising(sbas: int, c1: float = 1.0, compress: bool = True) -> OpTuple:
     h2e = c1 * vprqs
 
     try:
-        from libs.C_extension import compress_h1e_h2e as func
+        from pyscf_helper.libs import compress_h1e_h2e as func
     except ImportError:
         warnings.warn("Using compress h1e/h2e using python is pretty slower", stacklevel=2)
         func = _compress_h1e_h2e_py
@@ -181,7 +181,7 @@ def operators(sbas: int, compress: bool = True) -> NaNbSpinRaise_ops:
         return h1e, h2e
 
     try:
-        from libs.C_extension import compress_h1e_h2e as func
+        from pyscf_helper.libs import compress_h1e_h2e as func
     except ImportError:
         func = _compress_h1e_h2e_py
 
@@ -209,7 +209,7 @@ if __name__ == "__main__":
     print(np.allclose(h1e, result1[0]), np.allclose(h2e, result1[1]))
 
     try:
-        from libs.C_extension import decompress_h1e_h2e, compress_h1e_h2e
+        from pyscf_helper.libs import decompress_h1e_h2e, compress_h1e_h2e
 
         t1 = time.time_ns()
         result2 = compress_h1e_h2e(h1e, h2e, sorb)

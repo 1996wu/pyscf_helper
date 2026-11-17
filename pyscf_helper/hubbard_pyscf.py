@@ -148,9 +148,9 @@ def get_hubbard_model(
     ecore: float = mol.energy_nuc()
     info = (ecore, h1e, h2e)
 
-    # from pyscf import fci, cc
-    # cisolver = fci.FCI(mf)
-    # e_ref, coeff = cisolver.kernel()
-    # print(e_ref)
+    from pyscf import fci, cc
+    cisolver = fci.FCI(mf)
+    e_ref, coeff = cisolver.kernel()
+    print(f"fci: {e_ref}")
 
     return mol, mf, info

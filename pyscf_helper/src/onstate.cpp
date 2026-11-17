@@ -157,7 +157,7 @@ void get_olst_vlst_ab_cpu(const unsigned long *bra, int *lst, const int sorb,
   }
   // virtual orbital
   for (int i = 0; i < _len; i++) {
-    tmp = (i != _len - 1) ? (~bra[i]) : ((~bra[i]) & get_ones_cpu(sorb % 64));
+    tmp = (i != _len - 1) ? (~bra[i]) : ((~bra[i]) & get_ones_cpu(sorb % 64 == 0 ? 64 : sorb % 64));
     while (tmp != 0) {
       int j = __builtin_ctzl(tmp);
       int s = i * 64 + j;

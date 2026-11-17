@@ -5,14 +5,13 @@ import os
 import warnings
 import itertools
 import numpy as np
-import sys
-sys.path.append("./")
 
 from numpy import ndarray
 from typing import Tuple
 
-from pyscf_helper.libs import tensor_to_onv
-__all__ = ["read_integral", "Integral"]
+from pathlib import Path
+__all__ = ["read_integral", "Integral", "get_special_space",
+           "load_integrals", "spin_to_spatial", "spinorb_from_spatial"]
 
 
 def get_special_space(x: int, sorb: int, noa: int, nob: int) -> ndarray:
@@ -33,15 +32,14 @@ def get_special_space(x: int, sorb: int, noa: int, nob: int) -> ndarray:
 
     m = len(noA_lst)
     n = len(noB_lst)
-    spins = np.zeros((m * n, sorb), dtype=np.uint8)
+    spins = np.zeros((m * n, 64 * ((sorb + 63) // 64)), dtype=np.uint8)
     for i, lstA in enumerate(noA_lst):
         for j, lstB in enumerate(noB_lst):
-            idx = i * m + j
+            idx = i * n + j
             spins[idx, lstA] = 1
             spins[idx, lstB] = 1
 
-    return tensor_to_onv(spins, sorb)
-    # return convert_onv(spins, sorb=sorb, device=device)
+    return np.packbits(spins, axis=-1, bitorder="little")
 
 class Integral:
     """
@@ -143,7 +141,37 @@ def read_integral(
         n2 = special.comb(sorb // 2, nob, exact=True)
         fci_size = n1 * n2
         warnings.warn(
-            f"The CI-space({onstate.size(0):.3E}) is part of the FCI-space({fci_size:.3E})"
+            f"The CI-space({onstate.shape[0]:.3E}) is part of the FCI-space({fci_size:.3E})"
         )
 
     return (h1e, h2e, onstate, ecore, sorb)
+
+
+def load_integrals(path: str | Path) -> tuple[ndarray, ndarray, float, int]:
+    """Read compressed spin-orbital integrals without constructing a CI space."""
+    return Integral(str(path)).load()
+
+
+def spin_to_spatial(h1e: ndarray, h2e: ndarray, sorb: int) -> tuple[ndarray, ndarray]:
+    """Compressed antisymmetrized spin integrals -> spatial chemist notation."""
+    from .libs import decompress_h1e_h2e
+
+    h1, h2 = decompress_h1e_h2e(h1e, h2e, sorb)
+    alpha, beta = np.arange(0, sorb, 2), np.arange(1, sorb, 2)
+    return (np.ascontiguousarray(h1[::2, ::2]),
+            np.ascontiguousarray(h2[np.ix_(alpha, beta, alpha, beta)].transpose(0, 2, 1, 3)))
+
+
+def spinorb_from_spatial(int1e: ndarray, int2e: ndarray) -> tuple[ndarray, ndarray]:
+    """Spatial chemist integrals -> interleaved-spin antisymmetrized integrals."""
+    sbas = 2 * int1e.shape[0]
+    h1e = np.zeros((sbas, sbas))
+    h1e[0::2, 0::2] = int1e
+    h1e[1::2, 1::2] = int1e
+    h2e = np.zeros((sbas, sbas, sbas, sbas))
+    h2e[0::2, 0::2, 0::2, 0::2] = int2e
+    h2e[1::2, 1::2, 1::2, 1::2] = int2e
+    h2e[0::2, 0::2, 1::2, 1::2] = int2e
+    h2e[1::2, 1::2, 0::2, 0::2] = int2e
+    h2e = h2e.transpose(0, 2, 1, 3)
+    return h1e, h2e - h2e.transpose(0, 1, 3, 2)

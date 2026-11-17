@@ -6,6 +6,7 @@
 #include "hamiltonian.h"
 #include "hamiltonian_part.h"
 #include "integral.h"
+#include "sci_kernel.h"
 
 namespace py = pybind11;
 using ONV = py::array_t<uint8_t>;
@@ -121,48 +122,6 @@ auto get_Hij_part(ONV bra, ONV ket, array h1e, array h2e, int sorb, int nele) {
   }
 
   return std::make_tuple(Hmat_s, Hmat_d, sign);
-}
-
-auto tensor_to_onv(const ONV& bra_tensor, const int sorb) {
-  // uint8: [1, 1, 0, 0] -> 0b0011 uint8
-  py::buffer_info buf_info = bra_tensor.request();
-  const auto* bra_ptr = static_cast<uint8_t*>(buf_info.ptr);
-  int nbatch = buf_info.shape[0];
-  const int bra_len = (sorb - 1) / 64 + 1;
-
-  ONV states({nbatch, bra_len * 8});
-  auto* states_ptr = reinterpret_cast<unsigned long*>(states.request().ptr);
-  std::fill(states_ptr, states_ptr + nbatch * bra_len, 0);  // fill 0
-
-#pragma omp parallel for
-  for (int64_t i = 0; i < nbatch; i++) {
-    for (int64_t j = 0; j < sorb; j++) {
-      if (bra_ptr[i * sorb + j] == 1) {  // 1: occupied 0: unoccupied
-        BIT_FLIP(states_ptr[i * bra_len + j / 64], j % 64);
-      }
-    }
-  }
-
-  return states;
-}
-
-array onv_to_tensor(const ONV& bra, const int sorb) {
-  py::buffer_info bra_buf = bra.request();
-  const auto* bra_ptr = reinterpret_cast<const unsigned long*>(bra_buf.ptr);
-  auto shape = bra_buf.shape;
-  int nbatch = shape[0];
-  const int bra_len = (sorb - 1) / 64 + 1;
-
-  array comb_bit({nbatch, sorb});
-  auto* comb_ptr = static_cast<double*>(comb_bit.request().ptr);
-
-#pragma omp parallel for
-  for (int i = 0; i < nbatch; ++i) {
-    squant::get_zvec_cpu(&bra_ptr[i * bra_len], &comb_ptr[i * sorb], sorb,
-                         bra_len);
-  }
-
-  return comb_bit;
 }
 
 auto get_merged(const py::array_t<uint8_t>& bra, const int nele, const int sorb,
@@ -328,17 +287,13 @@ auto sparse_hij_part(const array h1e, const array h2e, const ONV& bra,
 }
 
 PYBIND11_MODULE(libs, m) {
+  bind_sci(m);
   m.def("get_hij", &get_Hij, py::arg("bra"), py::arg("ket"), py::arg("h1e"),
         py::arg("h2e"), py::arg("sorb"), py::arg("nele"),
         "Calculate the matrix <x|H|x'> using CPU with numpy");
   m.def("get_hij_part", &get_Hij_part, py::arg("bra"), py::arg("ket"),
         py::arg("h1e"), py::arg("h2e"), py::arg("sorb"), py::arg("nele"),
         "Calculate the matrix <x|H|x'> using CPU with numpy");
-  m.def("tensor_to_onv", &tensor_to_onv, py::arg("bra"), py::arg("sorb"),
-        "convert states (0:unoccupied, 1: occupied) to onv uint8");
-  m.def("onv_to_tensor", &onv_to_tensor, py::arg("bra"), py::arg("sorb"),
-        "convert onv to bit (-1:unoccupied, 1: occupied) for given onv "
-        "using CPU with numpy");
   m.def("get_comb", &get_comb, py::arg("bra"), py::arg("sorb"), py::arg("nele"),
         py::arg("noA"), py::arg("noB"), py::arg("flag_bit") = false,
         "Return all singles and doubles excitation for given onv"
