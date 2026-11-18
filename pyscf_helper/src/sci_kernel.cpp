@@ -200,6 +200,57 @@ static std::vector<std::size_t> scan_work(const Singles& links,
   return work;
 }
 
+
+struct GroupBitmap {
+  std::size_t stride = 0;
+  std::vector<unsigned long> bits;
+  std::vector<Row> rank;
+};
+
+template <class String>
+static GroupBitmap group_bitmap(const Groups<String>& g, std::size_t columns) {
+  GroupBitmap out;
+  out.stride = (columns + 63) / 64;
+  out.bits.assign(g.keys.size() * out.stride, 0);
+  out.rank.resize(out.bits.size());
+  for (std::size_t group = 0; group < g.keys.size(); ++group) {
+    auto base = group * out.stride;
+    for (auto p = g.ptr[group]; p < g.ptr[group + 1]; ++p) {
+      auto id = static_cast<std::size_t>(g.secondary_id[p]);
+      out.bits[base + id / 64] |= 1UL << (id % 64);
+    }
+    Row count = 0;
+    for (std::size_t w = 0; w < out.stride; ++w) {
+      out.rank[base + w] = count;
+      count += __builtin_popcountl(out.bits[base + w]);
+    }
+  }
+  return out;
+}
+
+struct NeighborWords {
+  std::vector<std::size_t> ptr;
+  std::vector<Row> word;
+  std::vector<unsigned long> mask;
+};
+
+static NeighborWords neighbor_words(const Singles& graph) {
+  NeighborWords out;
+  out.ptr.push_back(0);
+  for (std::size_t group = 0; group + 1 < graph.ptr.size(); ++group) {
+    for (auto p = graph.ptr[group]; p < graph.ptr[group + 1]; ++p) {
+      Row id = graph.targets[p], w = id / 64;
+      if (out.word.size() == out.ptr.back() || out.word.back() != w) {
+        out.word.push_back(w);
+        out.mask.push_back(0);
+      }
+      out.mask.back() |= 1UL << (id % 64);
+    }
+    out.ptr.push_back(out.word.size());
+  }
+  return out;
+}
+
 template <class String>
 class FixedSpaceHamiltonian {
   py::array_t<std::uint8_t, py::array::c_style> onv_owner;
@@ -211,9 +262,13 @@ class FixedSpaceHamiltonian {
   std::vector<String> alpha, beta;
   Groups<String> ga, gb;
   Singles sa, sb, da, db;
+  GroupBitmap bga, bgb;
+  NeighborWords bsa, bsb;
   std::vector<std::size_t> alpha_scan_work, beta_scan_work;
   std::vector<double> diag;
   std::vector<unsigned long> fermion_parity;
+  // Per-thread neighbor membership scratch, bounded by the link budget.
+  std::size_t mixed_marker_size = 0;
 
   std::vector<Row> generated_singles(String x, const Groups<String>& g) const {
     std::vector<Row> result;
@@ -330,61 +385,108 @@ class FixedSpaceHamiltonian {
     }
   }
 
-  template <class F>
-  void opposite_spin(Row i, F fn) const {
-    std::vector<Row> local_a, local_b;
+  struct NeighborRange {
+    const Row* begin;
+    const Row* end;
+  };
+
+  NeighborRange single_neighbors(Row i, const Groups<String>& groups,
+                                 const Singles& graph,
+                                 std::vector<Row>& scratch) const {
     static const Row empty = 0;
-    const Row *abegin, *aend, *bbegin, *bend;
-    if (sa.cached) {
-      auto base = sa.targets.empty() ? &empty : sa.targets.data();
-      abegin = base + sa.ptr[ga.id[i]];
-      aend = base + sa.ptr[ga.id[i] + 1];
-    } else {
-      local_a = generated_singles(alpha[i], ga);
-      abegin = local_a.empty() ? &empty : local_a.data();
-      aend = abegin + local_a.size();
+    const Row id = groups.id[i];
+    if (graph.cached) {
+      const Row* base = graph.targets.empty() ? &empty : graph.targets.data();
+      return {base + graph.ptr[id], base + graph.ptr[id + 1]};
     }
-    if (sb.cached) {
-      auto base = sb.targets.empty() ? &empty : sb.targets.data();
-      bbegin = base + sb.ptr[gb.id[i]];
-      bend = base + sb.ptr[gb.id[i] + 1];
-    } else {
-      local_b = generated_singles(beta[i], gb);
-      bbegin = local_b.empty() ? &empty : local_b.data();
-      bend = bbegin + local_b.size();
-    }
-    if (abegin == aend || bbegin == bend) return;
-    const bool swap = sa.cached && sb.cached &&
-                      beta_scan_work[gb.id[i]] < alpha_scan_work[ga.id[i]];
-    const Groups<String>& outer = swap ? gb : ga;
-    const Groups<String>& inner = swap ? ga : gb;
-    const auto& changing = swap ? alpha : beta;
-    const Row* begin = swap ? bbegin : abegin;
-    const Row* end = swap ? bend : aend;
-    const Row* inner_begin = swap ? abegin : bbegin;
-    const Row* inner_end = swap ? aend : bend;
-    const std::size_t count = inner_end - inner_begin;
-    for (auto a = begin; a != end; ++a) {
-      std::size_t lo = outer.ptr[*a], hi = outer.ptr[*a + 1], size = hi - lo;
-      if (size == inner.keys.size()) {
-        for (auto b = inner_begin; b != inner_end; ++b)
-          fn(outer.rows[lo + *b], 2);
-      } else if (size <= count * outer.scan_weight[*a]) {
-        for (std::size_t p = lo; p < hi; ++p) {
-          Row j = outer.rows[p];
-          if (popcount(changing[i] ^ changing[j]) == 2) fn(j, 2);
-        }
-      } else {
-        join_group(outer, *a, inner.keys.size(), inner_begin, inner_end, 2, fn);
+    scratch = generated_singles(groups.keys[id], groups);
+    const Row* base = scratch.empty() ? &empty : scratch.data();
+    return {base, base + scratch.size()};
+  }
+
+  template <class F>
+  static void emit_bitmap_matches(const GroupBitmap& bitmap,
+                                  const NeighborWords& neighbors, Row group_id,
+                                  const Row* group_rows, std::size_t word_begin,
+                                  std::size_t word_end, F& emit) {
+    const auto base = static_cast<std::size_t>(group_id) * bitmap.stride;
+    for (auto p = word_begin; p < word_end; ++p) {
+      const auto w = static_cast<std::size_t>(neighbors.word[p]);
+      const unsigned long present = bitmap.bits[base + w];
+      for (unsigned long hits = present & neighbors.mask[p]; hits; hits &= hits - 1) {
+        const unsigned long bit = hits & -hits;
+        const Row offset = bitmap.rank[base + w] + __builtin_popcountl(present & (bit - 1));
+        emit(group_rows[offset], 2);
       }
     }
   }
 
   template <class F>
-  void neighbors(Row i, F fn) const {
+  void opposite_spin(Row i, F emit, std::uint8_t* marks) const {
+    std::vector<Row> alpha_scratch, beta_scratch;
+    const auto alpha_neighbors = single_neighbors(i, ga, sa, alpha_scratch);
+    const auto beta_neighbors = single_neighbors(i, gb, sb, beta_scratch);
+    if (alpha_neighbors.begin == alpha_neighbors.end ||
+        beta_neighbors.begin == beta_neighbors.end) return;
+
+    const bool beta_outer = sa.cached && sb.cached &&
+                            beta_scan_work[gb.id[i]] < alpha_scan_work[ga.id[i]];
+    const auto& outer = beta_outer ? gb : ga;
+    const auto& inner = beta_outer ? ga : gb;
+    const auto& inner_strings = beta_outer ? alpha : beta;
+    const auto& outer_neighbors = beta_outer ? beta_neighbors : alpha_neighbors;
+    const auto& inner_neighbors = beta_outer ? alpha_neighbors : beta_neighbors;
+    const auto inner_count = inner_neighbors.end - inner_neighbors.begin;
+    bool marked = false;
+
+    const auto& bitmap = beta_outer ? bgb : bga;
+    const auto& bit_neighbors = beta_outer ? bsa : bsb;
+    const Row inner_id = inner.id[i];
+    const bool has_bitmap = !bitmap.bits.empty();
+    const std::size_t word_begin = has_bitmap ? bit_neighbors.ptr[inner_id] : 0;
+    const std::size_t word_end = has_bitmap ? bit_neighbors.ptr[inner_id + 1] : 0;
+
+    for (auto p = outer_neighbors.begin; p != outer_neighbors.end; ++p) {
+      const Row group_id = *p;
+      const auto lo = outer.ptr[group_id], hi = outer.ptr[group_id + 1];
+      const auto size = hi - lo;
+      if (size == inner.keys.size()) {
+        for (auto b = inner_neighbors.begin; b != inner_neighbors.end; ++b)
+          emit(outer.rows[lo + *b], 2);
+      } else if (has_bitmap && size > 2 * (word_end - word_begin)) {
+        emit_bitmap_matches(bitmap, bit_neighbors, group_id,
+                            outer.rows.data() + lo, word_begin, word_end, emit);
+      } else if (size <= inner_count * outer.scan_weight[group_id]) {
+        if (marks) {
+          // Mark once per input row, then reuse across scanned groups.
+          if (!marked) {
+            for (auto b = inner_neighbors.begin; b != inner_neighbors.end; ++b)
+              marks[*b] = 1;
+            marked = true;
+          }
+          for (auto q = lo; q < hi; ++q)
+            if (marks[outer.secondary_id[q]]) emit(outer.rows[q], 2);
+        } else {
+          for (auto q = lo; q < hi; ++q) {
+            const Row j = outer.rows[q];
+            if (popcount(inner_strings[i] ^ inner_strings[j]) == 2) emit(j, 2);
+          }
+        }
+      } else {
+        join_group(outer, group_id, inner.keys.size(), inner_neighbors.begin,
+                   inner_neighbors.end, 2, emit);
+      }
+    }
+    if (marked)
+      for (auto b = inner_neighbors.begin; b != inner_neighbors.end; ++b)
+        marks[*b] = 0;
+  }
+
+  template <class F>
+  void neighbors(Row i, F fn, std::uint8_t* marks = nullptr) const {
     same_spin(i, true, fn);
     same_spin(i, false, fn);
-    opposite_spin(i, fn);
+    opposite_spin(i, fn, marks);
   }
 
   double value(Row i, Row j, int degree) const {
@@ -483,6 +585,27 @@ class FixedSpaceHamiltonian {
       da = make_doubles(ga.keys, norb, noa, link_budget / 2 - link_bytes(sa));
     if (n > gb.keys.size() * 4 && link_bytes(sb) < link_budget / 2)
       db = make_doubles(gb.keys, norb, nob, link_budget / 2 - link_bytes(sb));
+
+    const double bitmap_bound =
+        (ga.keys.size() * double((gb.keys.size() + 63) / 64) +
+         gb.keys.size() * double((ga.keys.size() + 63) / 64)) * 12 +
+        (sa.targets.size() + sb.targets.size()) * 12.0 +
+        (ga.keys.size() + gb.keys.size() + 2) * 8.0;
+    const auto cached_bytes = link_bytes(sa) + link_bytes(sb) +
+                              link_bytes(da) + link_bytes(db);
+    if (sa.cached && sb.cached && n > ga.keys.size() * 32 &&
+        n > gb.keys.size() * 32 && cached_bytes + bitmap_bound +
+        std::max(ga.keys.size(), gb.keys.size()) * double(omp_get_max_threads()) < link_budget) {
+      bga = group_bitmap(ga, gb.keys.size());
+      bgb = group_bitmap(gb, ga.keys.size());
+      bsa = neighbor_words(sa);
+      bsb = neighbor_words(sb);
+    }
+
+    const std::size_t keys = std::max(ga.keys.size(), gb.keys.size());
+    if (sa.cached && sb.cached &&
+        keys * sizeof(std::uint8_t) * omp_get_max_threads() <= link_budget)
+      mixed_marker_size = keys;
     diag.resize(n);
     fermion_parity.assign(n * width, 0);
 #pragma omp parallel for
@@ -508,13 +631,18 @@ class FixedSpaceHamiltonian {
     const double* x = v.data();
     double* y = out.mutable_data();
     py::gil_scoped_release release;
-#pragma omp parallel for
-    for (std::size_t row = 0; row < n; ++row) {
-      Row i = static_cast<Row>(row);
-      double sum = diag[i] * x[i];
-      neighbors(i,
-                [&](Row j, int degree) { sum += value(i, j, degree) * x[j]; });
-      y[i] = sum;
+#pragma omp parallel
+    {
+      std::vector<std::uint8_t> marks(mixed_marker_size, 0);
+#pragma omp for
+      for (std::size_t row = 0; row < n; ++row) {
+        Row i = static_cast<Row>(row);
+        double sum = diag[i] * x[i];
+        neighbors(
+            i, [&](Row j, int degree) { sum += value(i, j, degree) * x[j]; },
+            marks.empty() ? nullptr : marks.data());
+        y[i] = sum;
+      }
     }
     return out;
   }
@@ -539,6 +667,7 @@ class FixedSpaceHamiltonian {
            reference_sc[3] = {0, 0, 0};
     double accumulation = 0, max_sc_error = 0;
     const double* x = v.data();
+    std::vector<std::uint8_t> marks(mixed_marker_size, 0);
     const auto wall = Clock::now();
     {
       py::gil_scoped_release release;
@@ -556,7 +685,9 @@ class FixedSpaceHamiltonian {
         same_spin(i, false, emit_same);
         lookup[1] += seconds(start);
         start = Clock::now();
-        opposite_spin(i, [&](Row j, int) { targets[2].push_back(j); });
+        opposite_spin(
+            i, [&](Row j, int) { targets[2].push_back(j); },
+            marks.empty() ? nullptr : marks.data());
         lookup[2] += seconds(start);
         for (int kind = 0; kind < 3; ++kind) {
           links[kind] += targets[kind].size();
@@ -629,8 +760,17 @@ class FixedSpaceHamiltonian {
     out["parity_bytes"] = fermion_parity.size() * sizeof(unsigned long);
     out["onv_words"] = width;
     out["spin_string_bits"] = sizeof(String) * 8;
+    out["mixed_lookup_workspace_bytes"] =
+        mixed_marker_size * sizeof(std::uint8_t) * omp_get_max_threads();
     out["offdiagonal_value_cache_bytes"] = 0;
-    out["connectivity_bytes"] =
+
+    const auto bitmap_bytes = (bga.bits.size() + bgb.bits.size() +
+                               bsa.mask.size() + bsb.mask.size()) * 8 +
+                              (bga.rank.size() + bgb.rank.size() +
+                               bsa.word.size() + bsb.word.size()) * 4 +
+                              (bsa.ptr.size() + bsb.ptr.size()) * 8;
+    out["mixed_bitmap_bytes"] = bitmap_bytes;
+    out["connectivity_bytes"] = bitmap_bytes +
         (alpha.size() + beta.size() + ga.keys.size() + gb.keys.size()) *
             sizeof(String) +
         (ga.ptr.size() + gb.ptr.size() + sa.ptr.size() + sb.ptr.size() +

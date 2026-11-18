@@ -30,6 +30,7 @@ class _HamiltonianInfo(TypedDict):
     parity_bytes: int
     onv_words: int
     spin_string_bits: int
+    mixed_lookup_workspace_bytes: int
     offdiagonal_value_cache_bytes: int
     connectivity_bytes: int
 
