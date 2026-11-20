@@ -6,9 +6,11 @@
 #include <pybind11/stl.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <new>
 #include <numeric>
 #include <stdexcept>
 #include <unordered_map>
@@ -19,10 +21,15 @@
 
 // Connectivity: Fast SHCI, arXiv:1809.04600, Section III / Algorithms 1--2.
 // Matrix elements reuse the existing pyscf_helper Slater--Condon functions.
-// Row ownership avoids atomics in sigma. No matrix-element threshold is used.
+// Row ownership or thread-private sums avoid atomics in sigma.
+// No matrix-element threshold is used.
 namespace py = pybind11;
 namespace {
 using Row = std::int32_t;
+
+struct GroupPair {
+  Row alpha, beta;
+};
 
 static unsigned long compact_even(unsigned long x) {
   x &= 0x5555555555555555ULL;
@@ -200,7 +207,6 @@ static std::vector<std::size_t> scan_work(const Singles& links,
   return work;
 }
 
-
 struct GroupBitmap {
   std::size_t stride = 0;
   std::vector<unsigned long> bits;
@@ -269,6 +275,85 @@ class FixedSpaceHamiltonian {
   std::vector<unsigned long> fermion_parity;
   // Per-thread neighbor membership scratch, bounded by the link budget.
   std::size_t mixed_marker_size = 0;
+  std::vector<GroupPair> group_tasks;
+  std::size_t grouped_max_threads = 0;
+
+  std::size_t mixed_bitmap_bytes() const {
+    return (bga.bits.size() + bgb.bits.size() + bsa.mask.size() +
+            bsb.mask.size()) *
+               sizeof(unsigned long) +
+           (bga.rank.size() + bgb.rank.size() + bsa.word.size() +
+            bsb.word.size()) *
+               sizeof(Row) +
+           (bsa.ptr.size() + bsb.ptr.size()) * sizeof(std::size_t);
+  }
+
+  void build_group_tasks(std::size_t budget) {
+    const std::size_t bytes_per_thread = n * sizeof(double);
+    const std::size_t threads = omp_get_max_threads();
+    const std::size_t seen_bytes = bga.bits.size() * sizeof(unsigned long);
+    if (seen_bytes >= budget || threads > budget / bytes_per_thread) return;
+    // The discovery bitmap is freed before the first accumulator is allocated.
+    const std::size_t max_tasks =
+        (budget - std::max(seen_bytes, threads * bytes_per_thread)) /
+        sizeof(GroupPair);
+    if (max_tasks == 0) return;
+
+    std::vector<unsigned long> seen(bga.bits.size(), 0);
+    std::size_t count = 0;
+    for (std::size_t a = 0; a < ga.keys.size(); ++a) {
+      auto* words = seen.data() + a * bga.stride;
+      for (auto p = ga.ptr[a]; p < ga.ptr[a + 1]; ++p) {
+        const Row source_beta = gb.id[ga.rows[p]];
+        for (auto q = sb.ptr[source_beta]; q < sb.ptr[source_beta + 1]; ++q) {
+          const Row b = sb.targets[q];
+          words[b / 64] |= 1UL << (b % 64);
+        }
+      }
+      for (std::size_t w = 0; w < bga.stride; ++w)
+        count += __builtin_popcountl(words[w]);
+      if (count > max_tasks) return;
+    }
+
+    std::vector<GroupPair> tasks;
+    tasks.reserve(count);
+    if (tasks.capacity() > max_tasks) return;
+    // Consume each bit at first discovery in input-row order, as in the
+    // benchmark.
+    for (std::size_t row = 0; row < n; ++row) {
+      const Row a = ga.id[row], source_beta = gb.id[row];
+      auto* words = seen.data() + static_cast<std::size_t>(a) * bga.stride;
+      for (auto p = sb.ptr[source_beta]; p < sb.ptr[source_beta + 1]; ++p) {
+        const Row b = sb.targets[p];
+        const unsigned long mask = 1UL << (b % 64);
+        if (words[b / 64] & mask) {
+          words[b / 64] ^= mask;
+          tasks.push_back({a, b});
+        }
+      }
+    }
+    grouped_max_threads =
+        (budget - tasks.capacity() * sizeof(GroupPair)) / bytes_per_thread;
+    group_tasks.swap(tasks);
+  }
+
+  bool can_use_grouped(std::size_t threads) const {
+    return !group_tasks.empty() && threads <= grouped_max_threads;
+  }
+
+  bool symmetric_one_body() const {
+    constexpr double tolerance = 32 * std::numeric_limits<double>::epsilon();
+    for (int p = 0; p < sorb; ++p)
+      for (int q = p + 1; q < sorb; ++q) {
+        const double pq = h1[p * sorb + q], qp = h1[q * sorb + p];
+        const double difference = std::abs(pq - qp);
+        if (!std::isfinite(difference) ||
+            difference >
+                tolerance * std::max({1.0, std::abs(pq), std::abs(qp)}))
+          return false;
+      }
+    return true;
+  }
 
   std::vector<Row> generated_singles(String x, const Groups<String>& g) const {
     std::vector<Row> result;
@@ -328,6 +413,13 @@ class FixedSpaceHamiltonian {
     }
   }
 
+  std::size_t same_spin_scan_limit(bool change_alpha) const {
+    const int occ = change_alpha ? noa : nob, vir = norb - occ;
+    return 1 + occ * vir +
+           static_cast<std::size_t>(occ * (occ - 1) / 2) *
+               (vir * (vir - 1) / 2);
+  }
+
   template <class F>
   void same_spin(Row i, bool change_alpha, F fn) const {
     const Groups<String>& group = change_alpha ? gb : ga;
@@ -356,11 +448,7 @@ class FixedSpaceHamiltonian {
         return;
       }
     }
-    const int occ = change_alpha ? noa : nob, vir = norb - occ;
-    const std::size_t physical =
-        occ * vir +
-        static_cast<std::size_t>(occ * (occ - 1) / 2) * (vir * (vir - 1) / 2);
-    if (group.ptr[gid + 1] - group.ptr[gid] <= physical + 1) {
+    if (group_size <= same_spin_scan_limit(change_alpha)) {
       for (std::size_t p = group.ptr[gid]; p < group.ptr[gid + 1]; ++p) {
         Row j = group.rows[p];
         int bits = popcount(x ^ changing[j]);
@@ -413,9 +501,11 @@ class FixedSpaceHamiltonian {
     for (auto p = word_begin; p < word_end; ++p) {
       const auto w = static_cast<std::size_t>(neighbors.word[p]);
       const unsigned long present = bitmap.bits[base + w];
-      for (unsigned long hits = present & neighbors.mask[p]; hits; hits &= hits - 1) {
+      for (unsigned long hits = present & neighbors.mask[p]; hits;
+           hits &= hits - 1) {
         const unsigned long bit = hits & -hits;
-        const Row offset = bitmap.rank[base + w] + __builtin_popcountl(present & (bit - 1));
+        const Row offset =
+            bitmap.rank[base + w] + __builtin_popcountl(present & (bit - 1));
         emit(group_rows[offset], 2);
       }
     }
@@ -427,10 +517,12 @@ class FixedSpaceHamiltonian {
     const auto alpha_neighbors = single_neighbors(i, ga, sa, alpha_scratch);
     const auto beta_neighbors = single_neighbors(i, gb, sb, beta_scratch);
     if (alpha_neighbors.begin == alpha_neighbors.end ||
-        beta_neighbors.begin == beta_neighbors.end) return;
+        beta_neighbors.begin == beta_neighbors.end)
+      return;
 
-    const bool beta_outer = sa.cached && sb.cached &&
-                            beta_scan_work[gb.id[i]] < alpha_scan_work[ga.id[i]];
+    const bool beta_outer =
+        sa.cached && sb.cached &&
+        beta_scan_work[gb.id[i]] < alpha_scan_work[ga.id[i]];
     const auto& outer = beta_outer ? gb : ga;
     const auto& inner = beta_outer ? ga : gb;
     const auto& inner_strings = beta_outer ? alpha : beta;
@@ -444,7 +536,8 @@ class FixedSpaceHamiltonian {
     const Row inner_id = inner.id[i];
     const bool has_bitmap = !bitmap.bits.empty();
     const std::size_t word_begin = has_bitmap ? bit_neighbors.ptr[inner_id] : 0;
-    const std::size_t word_end = has_bitmap ? bit_neighbors.ptr[inner_id + 1] : 0;
+    const std::size_t word_end =
+        has_bitmap ? bit_neighbors.ptr[inner_id + 1] : 0;
 
     for (auto p = outer_neighbors.begin; p != outer_neighbors.end; ++p) {
       const Row group_id = *p;
@@ -529,6 +622,93 @@ class FixedSpaceHamiltonian {
     return squant::get_HijD_cpu(bra, ket, h1, h2, sorb, width);
   }
 
+  void grouped_same_spin(bool change_alpha, const double* x,
+                         double* acc) const {
+    const auto& group = change_alpha ? gb : ga;
+    const auto& changing = change_alpha ? alpha : beta;
+    const auto scan_limit = same_spin_scan_limit(change_alpha);
+#pragma omp for schedule(dynamic, 4)
+    for (std::size_t g = 0; g < group.keys.size(); ++g) {
+      const auto lo = group.ptr[g], hi = group.ptr[g + 1];
+      for (auto p = lo; p < hi; ++p) {
+        const Row i = group.rows[p];
+        const double xi = x[i];
+        const auto accumulate = [&](Row j, int degree) {
+          const double h = value(i, j, degree);
+          acc[i] += h * x[j];
+          acc[j] += h * xi;
+        };
+        if (hi - lo > scan_limit) {
+          // Large groups can reuse neighbor lookup instead of scanning all
+          // pairs.
+          same_spin(i, change_alpha, [&](Row j, int degree) {
+            if (i < j) accumulate(j, degree);
+          });
+        } else {
+          for (auto q = p + 1; q < hi; ++q) {
+            const Row j = group.rows[q];
+            const int bits = popcount(changing[i] ^ changing[j]);
+            if (bits == 2 || bits == 4) accumulate(j, bits / 2);
+          }
+        }
+      }
+    }
+  }
+
+  bool matvec_grouped(const double* x, double* y, int threads) const {
+    std::vector<double> partial;
+    if (static_cast<std::size_t>(threads) > partial.max_size() / n)
+      return false;
+    try {
+      partial.resize(n * threads);
+    } catch (const std::bad_alloc&) {
+      return false;
+    }
+    // A spin string can have at most occupied * virtual single excitations.
+    constexpr std::size_t half_bits = sizeof(String) * 4;
+    constexpr std::size_t max_singles = half_bits * half_bits;
+#pragma omp parallel num_threads(threads)
+    {
+      double* acc = partial.data() + n * omp_get_thread_num();
+      grouped_same_spin(true, x, acc);
+      grouped_same_spin(false, x, acc);
+
+      std::array<Row, max_singles> in_a, in_b;
+#pragma omp for schedule(dynamic, 32)
+      for (std::size_t t = 0; t < group_tasks.size(); ++t) {
+        const auto [a, b] = group_tasks[t];
+        std::size_t size_a = 0, size_b = 0;
+        auto take_a = [&](Row row, int) { in_a[size_a++] = row; };
+        auto take_b = [&](Row row, int) { in_b[size_b++] = row; };
+        emit_bitmap_matches(bga, bsb, a, ga.rows.data() + ga.ptr[a], bsb.ptr[b],
+                            bsb.ptr[b + 1], take_a);
+        emit_bitmap_matches(bgb, bsa, b, gb.rows.data() + gb.ptr[b], bsa.ptr[a],
+                            bsa.ptr[a + 1], take_b);
+
+        for (std::size_t p = 0; p < size_a; ++p) {
+          const Row i = in_a[p];
+          const double xi = x[i];
+          for (std::size_t q = 0; q < size_b; ++q) {
+            const Row j = in_b[q];
+            // The reversed pair is emitted by task (alpha(j), beta(i)).
+            if (i >= j) continue;
+            const double h = value(i, j, 2);
+            acc[i] += h * x[j];
+            acc[j] += h * xi;
+          }
+        }
+      }
+
+#pragma omp for schedule(static)
+      for (std::size_t i = 0; i < n; ++i) {
+        double sum = diag[i] * x[i];
+        for (int t = 0; t < threads; ++t) sum += partial[t * n + i];
+        y[i] = sum;
+      }
+    }
+    return true;
+  }
+
  public:
   FixedSpaceHamiltonian(py::array_t<std::uint8_t, py::array::c_style> d,
                         py::array_t<double, py::array::c_style> h1e,
@@ -588,14 +768,18 @@ class FixedSpaceHamiltonian {
 
     const double bitmap_bound =
         (ga.keys.size() * double((gb.keys.size() + 63) / 64) +
-         gb.keys.size() * double((ga.keys.size() + 63) / 64)) * 12 +
+         gb.keys.size() * double((ga.keys.size() + 63) / 64)) *
+            12 +
         (sa.targets.size() + sb.targets.size()) * 12.0 +
         (ga.keys.size() + gb.keys.size() + 2) * 8.0;
-    const auto cached_bytes = link_bytes(sa) + link_bytes(sb) +
-                              link_bytes(da) + link_bytes(db);
+    const auto cached_bytes =
+        link_bytes(sa) + link_bytes(sb) + link_bytes(da) + link_bytes(db);
     if (sa.cached && sb.cached && n > ga.keys.size() * 32 &&
-        n > gb.keys.size() * 32 && cached_bytes + bitmap_bound +
-        std::max(ga.keys.size(), gb.keys.size()) * double(omp_get_max_threads()) < link_budget) {
+        n > gb.keys.size() * 32 &&
+        cached_bytes + bitmap_bound +
+                std::max(ga.keys.size(), gb.keys.size()) *
+                    double(omp_get_max_threads()) <
+            link_budget) {
       bga = group_bitmap(ga, gb.keys.size());
       bgb = group_bitmap(gb, ga.keys.size());
       bsa = neighbor_words(sa);
@@ -606,6 +790,17 @@ class FixedSpaceHamiltonian {
     if (sa.cached && sb.cached &&
         keys * sizeof(std::uint8_t) * omp_get_max_threads() <= link_budget)
       mixed_marker_size = keys;
+    const auto search_bytes = cached_bytes + mixed_bitmap_bytes();
+    // Product spaces use the row kernel's direct addressing of complete groups.
+    if (!bga.bits.empty() && !sa.targets.empty() && !sb.targets.empty() &&
+        n != ga.keys.size() * gb.keys.size() && search_bytes < link_budget &&
+        symmetric_one_body()) {
+      try {
+        build_group_tasks(link_budget - search_bytes);
+      } catch (const std::bad_alloc&) {
+        // The row kernel is also valid when the optional task table cannot fit.
+      }
+    }
     diag.resize(n);
     fermion_parity.assign(n * width, 0);
 #pragma omp parallel for
@@ -631,6 +826,8 @@ class FixedSpaceHamiltonian {
     const double* x = v.data();
     double* y = out.mutable_data();
     py::gil_scoped_release release;
+    const int threads = omp_get_max_threads();
+    if (can_use_grouped(threads) && matvec_grouped(x, y, threads)) return out;
 #pragma omp parallel
     {
       std::vector<std::uint8_t> marks(mixed_marker_size, 0);
@@ -743,6 +940,8 @@ class FixedSpaceHamiltonian {
 
   py::dict info() const {
     py::dict out;
+    const int threads = omp_get_max_threads();
+    const bool grouped = can_use_grouped(threads);
     out["n_alpha_strings"] = ga.keys.size();
     out["n_beta_strings"] = gb.keys.size();
     out["alpha_single_links"] = sa.targets.size();
@@ -754,23 +953,26 @@ class FixedSpaceHamiltonian {
     out["alpha_double_links"] = da.targets.size();
     out["beta_double_links"] = db.targets.size();
     out["parallel_runtime"] = "openmp";
-    out["threads"] = omp_get_max_threads();
+    out["threads"] = threads;
     out["openmp_dynamic"] = bool(omp_get_dynamic());
     out["openmp_schedule"] = "default";
     out["parity_bytes"] = fermion_parity.size() * sizeof(unsigned long);
     out["onv_words"] = width;
     out["spin_string_bits"] = sizeof(String) * 8;
     out["mixed_lookup_workspace_bytes"] =
-        mixed_marker_size * sizeof(std::uint8_t) * omp_get_max_threads();
+        mixed_marker_size * sizeof(std::uint8_t) * threads;
     out["offdiagonal_value_cache_bytes"] = 0;
+    out["grouped_enabled"] = grouped;
+    out["group_tasks"] = group_tasks.size();
+    const auto task_bytes = group_tasks.capacity() * sizeof(GroupPair);
+    out["group_task_bytes"] = task_bytes;
+    out["grouped_accumulator_bytes"] =
+        grouped ? n * sizeof(double) * threads : 0;
 
-    const auto bitmap_bytes = (bga.bits.size() + bgb.bits.size() +
-                               bsa.mask.size() + bsb.mask.size()) * 8 +
-                              (bga.rank.size() + bgb.rank.size() +
-                               bsa.word.size() + bsb.word.size()) * 4 +
-                              (bsa.ptr.size() + bsb.ptr.size()) * 8;
+    const auto bitmap_bytes = mixed_bitmap_bytes();
     out["mixed_bitmap_bytes"] = bitmap_bytes;
-    out["connectivity_bytes"] = bitmap_bytes +
+    out["connectivity_bytes"] =
+        bitmap_bytes + task_bytes +
         (alpha.size() + beta.size() + ga.keys.size() + gb.keys.size()) *
             sizeof(String) +
         (ga.ptr.size() + gb.ptr.size() + sa.ptr.size() + sb.ptr.size() +

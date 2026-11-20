@@ -31,7 +31,12 @@ class _HamiltonianInfo(TypedDict):
     onv_words: int
     spin_string_bits: int
     mixed_lookup_workspace_bytes: int
+    mixed_bitmap_bytes: int
     offdiagonal_value_cache_bytes: int
+    grouped_enabled: bool
+    group_tasks: int
+    group_task_bytes: int
+    grouped_accumulator_bytes: int
     connectivity_bytes: int
 
 
@@ -75,8 +80,9 @@ def StringHamiltonian(
     """Factory for one fixed-space operator; key width is selected internally.
 
     Inputs must be contiguous. h1e/h2e are compressed one-dimensional integrals;
-    link_budget is the string-adjacency cache budget in bytes. The operator does
-    not cache off-diagonal matrix elements. Supported even sorb is at most 256.
+    link_budget covers string adjacency, mixed bitmaps, and the optional
+    group-pair table and accumulators. The operator does not cache off-diagonal
+    matrix elements. Supported even sorb is at most 256.
     """
     ...
 
